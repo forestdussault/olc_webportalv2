@@ -1,4 +1,4 @@
-from . import views
+from olc_webportalv2.new_multisample import views
 from django.conf.urls import url, include
 
 
@@ -13,9 +13,6 @@ urlpatterns = [
     # Upload data for project
     url(r'^project/(?P<project_id>\d+)/upload$',
         views.upload_samples, name="upload_samples"),
-
-    url(r'^sample/(?P<sample_id>\d+)/$',
-        views.sample_detail, name="sample_detail"),
 
     url(r'^sample/(?P<sample_id>\d+)/sendsketch_results_table$',
         views.sendsketch_results_table, name="sendsketch_results_table"),
@@ -59,4 +56,12 @@ urlpatterns = [
     # AMR detail
     url(r'^sample/(?P<sample_id>\d+)/amr_detail$',
         views.amr_detail, name="amr_detail"),
+
+    # Forbidden
+    url(r'^forbidden$',
+        views.forbidden, name="forbidden"),
+
+    # Task Queue
+    url(r'^task_queue$',
+        views.task_queue, name="task_queue"),
 ]

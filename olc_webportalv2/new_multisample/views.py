@@ -1,17 +1,13 @@
-from django.shortcuts import render, get_object_or_404
 import os
-import pandas as pd
-
-from django.core.exceptions import ValidationError, ObjectDoesNotExist
-from django.core.files.storage import FileSystemStorage
+from django.core.exceptions import ObjectDoesNotExist
 from django.contrib.auth.decorators import login_required
-from django.http import Http404, HttpResponse, HttpResponseNotFound
-from django.shortcuts import render, redirect
+from django.shortcuts import render, redirect, get_object_or_404
 from django_tables2 import RequestConfig
-from .models import ProjectMulti, Sample, SendsketchResult, GenesipprResultsGDCS, AMRResult
-from .forms import ProjectForm, JobForm
-from . import tasks
-from .table import SendsketchTable
+from olc_webportalv2.new_multisample.models import ProjectMulti, Sample, SendsketchResult
+from olc_webportalv2.new_multisample.forms import ProjectForm, JobForm
+from olc_webportalv2.new_multisample import tasks
+from olc_webportalv2.new_multisample.table import SendsketchTable
+from background_task.models import Task
 # Create your views here.
 
 
@@ -45,8 +41,9 @@ def new_multisample(request):
 @login_required
 def upload_samples(request, project_id):
     project = get_object_or_404(ProjectMulti, pk=project_id)
+    if request.user != project.user:
+        return redirect('new_multisample:forbidden')
     if request.method == 'POST':
-        # form = SampleForm(request.POST)
         files = request.FILES.getlist('files')
         filenames = list()
         file_dict = dict()
@@ -94,10 +91,8 @@ def upload_samples(request, project_id):
 @login_required
 def project_detail(request, project_id):
     project = get_object_or_404(ProjectMulti, pk=project_id)
-    # try:
-    #     project_id = ProjectMulti.objects.get(pk=project_id)
-    # except ProjectMulti.DoesNotExist:
-    #     raise Http404("Project ID {} does not exist.".format(project_id))
+    if request.user != project.user:
+        return redirect('new_multisample:forbidden')
     if request.method == 'POST':
         form = JobForm(request.POST)
         # Save the form
@@ -106,7 +101,7 @@ def project_detail(request, project_id):
             print(jobs_to_run)
             if 'sendsketch' in jobs_to_run:
                 for sample in project.samples.all():
-                    if sample.sendsketch_status != 'Complete':
+                    if sample.sendsketch_status == 'Unprocessed':
                         if sample.file_fasta:
                             Sample.objects.filter(pk=sample.pk).update(sendsketch_status="Processing")
                             tasks.run_sendsketch_fasta(fasta_file=sample.file_fasta.name,
@@ -121,34 +116,35 @@ def project_detail(request, project_id):
 
             if 'genesipprv2' in jobs_to_run:
                 for sample in project.samples.all():
-                    if sample.genesippr_status != 'Complete':
+                    if sample.genesippr_status == 'Unprocessed' and not sample.file_fasta:
                         Sample.objects.filter(pk=sample.pk).update(genesippr_status="Processing")
-                tasks.run_genesippr(project_id=project.pk)
+                        tasks.run_genesippr(sample_id=sample.pk)
                 # Also get GeneSeekr going.
                 for sample in project.samples.all():
-                    if sample.file_fasta:
+                    if sample.file_fasta and sample.genesippr_status == 'Unprocessed':
+                        Sample.objects.filter(pk=sample.pk).update(genesippr_status="Processing")
                         tasks.run_geneseekr(fasta_file=sample.file_fasta.name,
                                             sample_pk=sample.pk)
 
             if 'confindr' in jobs_to_run:
                 for sample in project.samples.all():
-                    if sample.confindr_status != 'Complete' and not sample.file_fasta:
+                    if sample.confindr_status == 'Unprocessed' and not sample.file_fasta:
                         Sample.objects.filter(pk=sample.pk).update(confindr_status="Processing")
-                tasks.run_confindr(project_id=project.pk)
+                        tasks.run_confindr(sample_id=sample.pk)
 
             if 'genomeqaml' in jobs_to_run:
                 for sample in project.samples.all():
-                    if sample.genomeqaml_status != 'Complete' and sample.file_fasta:
+                    if sample.genomeqaml_status == 'Unprocessed' and sample.file_fasta:
                         Sample.objects.filter(pk=sample.pk).update(genomeqaml_status="Processing")
                         tasks.run_genomeqaml(fasta_file=sample.file_fasta.name,
                                              sample_pk=sample.pk)
 
             if 'amrdetect' in jobs_to_run:
                 for sample in project.samples.all():
-                    if sample.amr_status != 'Complete' and sample.file_fasta:
+                    if sample.amr_status == 'Unprocessed' and sample.file_fasta:
                         Sample.objects.filter(pk=sample.pk).update(amr_status="Processing")
                         tasks.run_amr_fasta(sample_pk=sample.pk)
-                    elif sample.amr_status != 'Complete' and not sample.file_fasta:
+                    elif sample.amr_status == 'Unprocessed' and not sample.file_fasta:
                         Sample.objects.filter(pk=sample.pk).update(amr_status="Processing")
                         tasks.run_amr(sample_pk=sample.pk)
 
@@ -163,17 +159,12 @@ def project_detail(request, project_id):
                    'user': request.user},
                   )
 
-@login_required
-def sample_detail(request, sample_id):
-    sample = get_object_or_404(Sample, pk=sample_id)
-    return render(request,
-                  'new_multisample/sample_detail.html',
-                  {'sample': sample},
-                  )
 
 @login_required
 def genomeqaml_detail(request, sample_id):
     sample = get_object_or_404(Sample, pk=sample_id)
+    if request.user != sample.project.user:
+        return redirect('new_multisample:forbidden')
     return render(request,
                   'new_multisample/genomeqaml_detail.html',
                   {'sample': sample},
@@ -184,6 +175,9 @@ def genomeqaml_detail(request, sample_id):
 def sendsketch_results_table(request, sample_id):
     try:
         sample = SendsketchResult.objects.filter(sample=Sample.objects.get(pk=sample_id)).exclude(rank='N/A')
+        s = get_object_or_404(Sample, pk=sample_id)
+        if request.user != s.project.user:
+            return redirect('new_multisample:forbidden')
         sendsketch_results_table_ = SendsketchTable(SendsketchResult.objects.all())
         base_project = Sample.objects.get(pk=sample_id)
         RequestConfig(request).configure(sendsketch_results_table_)
@@ -204,6 +198,8 @@ def sendsketch_results_table(request, sample_id):
 @login_required
 def confindr_results_table(request, project_id):
     project = get_object_or_404(ProjectMulti, pk=project_id)
+    if request.user != project.user:
+        return redirect('new_multisample:forbidden')
     return render(request,
                   'new_multisample/confindr_results_table.html',
                   {'project': project},
@@ -213,43 +209,30 @@ def confindr_results_table(request, project_id):
 @login_required
 def genomeqaml_results(request, project_id):
     project = get_object_or_404(ProjectMulti, pk=project_id)
+    if request.user != project.user:
+        return redirect('new_multisample:forbidden')
     return render(request,
                   'new_multisample/genomeqaml_results.html',
                   {'project': project},
                   )
 
 
-
 @login_required
 def display_genesippr_results(request, project_id):
     project = get_object_or_404(ProjectMulti, pk=project_id)
-    if project.results_created == 'True':
-        genesippr_data = pd.read_csv(project.genesippr_file).dropna(axis=1, how='all').fillna('')
-        genesippr_data_html = genesippr_data.to_html(classes=['table', 'table-hover', 'table-bordered'])
-        # serosippr_data = pd.read_csv(project.serosippr_file).fillna('')
-        # serosippr_data_html = serosippr_data.to_html(classes=['table', 'table-hover', 'table-bordered'])
-        gdcs_data = pd.read_csv(project.gdcs_file).fillna('')
-        gdcs_data = gdcs_data[['Strain', 'Genus', 'Matches', 'MeanCoverage', 'Pass/Fail']]
-        gdcs_data_html = gdcs_data.to_html(classes=['table', 'table-hover', 'table-bordered'])
-        sixteens_data = pd.read_csv(project.sixteens_file).fillna('')
-        sixteens_data_html = sixteens_data.to_html(classes=['table', 'table-hover', 'table-bordered'])
-        return render(request,
-                      'new_multisample/display_genesippr_results.html',
-                      {'project': project,
-                       'genesippr_data': genesippr_data_html,
-                       'sixteens_data': sixteens_data_html,
-                       'gdcs_data': gdcs_data_html},
-                       # 'serosippr_data': serosippr_data_html},
-                      )
-    else:
-        return render(request,
-                      'new_multisample/display_genesippr_results.html',
-                      {'project': project},
-                      )
+    if request.user != project.user:
+        return redirect('new_multisample:forbidden')
+    return render(request,
+                  'new_multisample/display_genesippr_results.html',
+                  {'project': project},
+                  )
+
 
 @login_required
 def project_remove(request, project_id):
     project = get_object_or_404(ProjectMulti, pk=project_id)
+    if request.user != project.user:
+        return redirect('new_multisample:forbidden')
     project.delete()
     return redirect('new_multisample:new_multisample')
 
@@ -257,6 +240,8 @@ def project_remove(request, project_id):
 @login_required
 def project_remove_confirm(request, project_id):
     project = get_object_or_404(ProjectMulti, pk=project_id)
+    if request.user != project.user:
+        return redirect('new_multisample:forbidden')
     return render(request,
                   'new_multisample/confirm_project_delete.html',
                   {'project': project},
@@ -267,6 +252,8 @@ def project_remove_confirm(request, project_id):
 def sample_remove(request, sample_id):
     sample = get_object_or_404(Sample, pk=sample_id)
     project = get_object_or_404(ProjectMulti, pk=sample.project.id)
+    if request.user != project.user:
+        return redirect('new_multisample:forbidden')
     sample.delete()
     return redirect('new_multisample:project_detail', project_id=project.id)
 
@@ -275,6 +262,8 @@ def sample_remove(request, sample_id):
 def sample_remove_confirm(request, sample_id):
     sample = get_object_or_404(Sample, pk=sample_id)
     project = get_object_or_404(ProjectMulti, pk=sample.project.id)
+    if request.user != project.user:
+        return redirect('new_multisample:forbidden')
     return render(request,
                   'new_multisample/confirm_sample_delete.html',
                   {'sample': sample,
@@ -285,14 +274,21 @@ def sample_remove_confirm(request, sample_id):
 @login_required
 def gdcs_detail(request, sample_id):
     sample = get_object_or_404(Sample, pk=sample_id)
+    if request.user != sample.project.user:
+        return redirect('new_multisample:forbidden')
     return render(request,
                   'new_multisample/gdcs_detail.html',
                   {'sample': sample},
                   )
 
+
 @login_required
 def amr_detail(request, sample_id):
     sample = get_object_or_404(Sample, pk=sample_id)
+    species = 'Unknown'
+    result_dict = dict()
+    if request.user != sample.project.user:
+        return redirect('new_multisample:forbidden')
     for amr_result in sample.amr_results.all():
         result_dict = amr_result.results_dict
         species = amr_result.species
@@ -305,9 +301,38 @@ def amr_detail(request, sample_id):
                   )
 
 
+@login_required
+def task_queue(request):
+    task_count = Task.objects.count()
+    task = Task.objects.filter()  # Get ALL the tasks!
+    # Need to: Figure out a way to assign verbose names to tasks,
+    # and also to generate a list of tasks with complete
+
+    # Get task offset for showing position in queue.
+    try:
+        offset = task[0].pk - 1
+        offset = offset * -1  # Make negative so we can do addition that's really subtraction in the template
+    except IndexError:  # Handle the case that there are no tasks.
+        offset = 0
+
+    return render(request,
+                  'new_multisample/task_queue.html',
+                  {'task': task,
+                   'task_count': task_count,
+                   'offset': offset},
+                  )
+
+
+def forbidden(request):
+    return render(request,
+                  'new_multisample/forbidden.html')
+
+
 def find_paired_reads(filelist, forward_id='_R1', reverse_id='_R2'):
     pairs = list()
     for filename in filelist:
         if forward_id in filename and filename.replace(forward_id, reverse_id) in filelist:
             pairs.append([filename, filename.replace(forward_id, reverse_id)])
     return pairs
+
+
